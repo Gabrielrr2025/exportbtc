@@ -1,0 +1,31 @@
+name: Update BTC CSV
+
+on:
+  schedule:
+    - cron: "0 4 * * *"   # roda todo dia às 04:00 UTC
+  workflow_dispatch:       # permite rodar manualmente
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pandas requests
+
+      - name: Run exporter
+        run: python export_btc.py
+
+      - name: Commit CSV
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add btc_prices.csv || echo "⚠️ Nenhum arquivo BTC para adicionar"
+          git commit -m "chore: update btc_prices.csv" || echo "No changes to commit"
+          git push
