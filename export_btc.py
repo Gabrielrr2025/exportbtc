@@ -1,32 +1,85 @@
 #!/usr/bin/env python3
 """
 Exporta histórico completo do BTC-USD para CSV local.
-Fontes: CoinGecko (primária) e Binance (fallback)
+Fonte: Yahoo Finance (via yfinance) - confiável e sem API key
 """
 
-import requests
 import pandas as pd
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 CSV_FILE = "btc_prices.csv"
 
-def fetch_btc_coingecko():
+def fetch_btc_yfinance():
     """
-    Baixa histórico completo do BTC via CoinGecko.
+    Baixa histórico completo do BTC via Yahoo Finance.
     Retorna DataFrame diário com colunas: date, Open, Close.
     """
-    print("📡 Tentando CoinGecko API...")
-    
-    url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-    params = {
-        "vs_currency": "usd",
-        "days": "max",  # Histórico completo
-        "interval": "daily"
-    }
-    headers = {"User-Agent": "BTC-Exporter/1.0"}
+    print("📡 Baixando histórico BTC via Yahoo Finance...")
     
     try:
+        import yfinance as yf
+        
+        # BTC-USD está disponível no Yahoo desde ~2014
+        # Pega histórico máximo possível
+        start_date = "2014-09-17"  # Início do BTC-USD no Yahoo
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        
+        print(f"   Período: {start_date} até {end_date}")
+        
+        # Download com configurações otimizadas
+        ticker = yf.Ticker("BTC-USD")
+        df = ticker.history(start=start_date, end=end_date, interval="1d")
+        
+        if df is None or df.empty:
+            raise ValueError("Yahoo Finance retornou vazio")
+        
+        print(f"✅ Yahoo Finance retornou {len(df)} dias")
+        
+        # Normaliza o formato
+        df.index = pd.to_datetime(df.index).date
+        df = df.reset_index()
+        df.columns = ['date'] + df.columns.tolist()[1:]
+        
+        # Seleciona apenas Open e Close
+        if 'Open' not in df.columns or 'Close' not in df.columns:
+            raise ValueError("Colunas Open/Close não encontradas")
+        
+        result = df[['date', 'Open', 'Close']].copy()
+        
+        # Remove NaN
+        result = result.dropna()
+        
+        print(f"✅ Processados {len(result)} dias válidos")
+        print(f"📅 Período final: {result['date'].min()} até {result['date'].max()}")
+        
+        return result
+        
+    except ImportError:
+        print("❌ yfinance não instalado. Execute: pip install yfinance")
+        return None
+    except Exception as e:
+        print(f"❌ Yahoo Finance falhou: {e}")
+        return None
+
+def fetch_btc_coingecko_free():
+    """
+    Fallback: Tenta endpoint gratuito do CoinGecko (limitado aos últimos ~365 dias)
+    """
+    print("📡 Tentando CoinGecko (endpoint gratuito)...")
+    
+    try:
+        import requests
+        
+        # Endpoint gratuito - últimos 365 dias
+        url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+        params = {
+            "vs_currency": "usd",
+            "days": "365",  # Gratuito suporta até 365 dias
+            "interval": "daily"
+        }
+        headers = {"User-Agent": "BTC-Exporter/1.0"}
+        
         r = requests.get(url, params=params, headers=headers, timeout=60)
         r.raise_for_status()
         data = r.json()
@@ -35,109 +88,101 @@ def fetch_btc_coingecko():
         if not prices:
             raise ValueError("CoinGecko retornou lista vazia")
 
-        print(f"✅ CoinGecko retornou {len(prices)} pontos de dados")
+        print(f"✅ CoinGecko retornou {len(prices)} pontos")
 
         # Processa dados
         df = pd.DataFrame(prices, columns=["timestamp", "price"])
         df["date"] = pd.to_datetime(df["timestamp"], unit="ms").dt.date
 
-        # Agrupa por dia: primeiro preço = Open, último = Close
+        # Agrupa por dia
         grouped = df.groupby("date")["price"]
-        df_daily = pd.DataFrame({
+        result = pd.DataFrame({
             "date": grouped.first().index,
             "Open": grouped.first().values,
             "Close": grouped.last().values,
         })
 
-        print(f"✅ Processados {len(df_daily)} dias únicos")
-        print(f"📅 Período: {df_daily['date'].min()} até {df_daily['date'].max()}")
+        print(f"✅ Processados {len(result)} dias únicos")
         
-        return df_daily
+        return result
         
     except Exception as e:
         print(f"❌ CoinGecko falhou: {e}")
         return None
 
-def fetch_btc_binance():
+def fetch_btc_cryptocompare():
     """
-    Fallback: Baixa histórico do BTC via Binance.
+    Fallback adicional: CryptoCompare (API gratuita, 2000 dias de histórico)
     """
-    print("📡 Tentando Binance API (fallback)...")
-    
-    url = "https://api.binance.com/api/v3/klines"
-    
-    all_data = []
-    
-    # Binance limita a 1000 velas, então fazemos múltiplas chamadas
-    # Começando de 2017-08-17 (lançamento do BTCUSDT na Binance)
-    start_time = int(datetime(2017, 8, 17).timestamp() * 1000)
-    end_time = int(datetime.now().timestamp() * 1000)
-    
-    current_start = start_time
+    print("📡 Tentando CryptoCompare API...")
     
     try:
-        while current_start < end_time:
-            params = {
-                "symbol": "BTCUSDT",
-                "interval": "1d",
-                "startTime": current_start,
-                "limit": 1000
-            }
-            
-            r = requests.get(url, params=params, timeout=30)
-            r.raise_for_status()
-            
-            batch = r.json()
-            if not batch:
-                break
-            
-            all_data.extend(batch)
-            
-            # Próximo batch
-            last_timestamp = batch[-1][0]
-            current_start = last_timestamp + 86400000  # +1 dia
-            
-            print(f"  ... baixados {len(all_data)} dias até agora")
-            
-            if len(batch) < 1000:
-                break
+        import requests
         
-        if not all_data:
-            raise ValueError("Binance retornou vazio")
+        url = "https://min-api.cryptocompare.com/data/v2/histoday"
         
-        print(f"✅ Binance retornou {len(all_data)} dias")
+        # CryptoCompare permite até 2000 dias por chamada
+        all_data = []
+        limit = 2000
         
-        # Processa dados da Binance
-        # Formato: [timestamp, open, high, low, close, volume, ...]
+        # Pega histórico desde 2014
+        to_ts = int(datetime.now().timestamp())
+        
+        params = {
+            "fsym": "BTC",
+            "tsym": "USD",
+            "limit": limit,
+            "toTs": to_ts
+        }
+        
+        r = requests.get(url, params=params, timeout=30)
+        r.raise_for_status()
+        
+        data = r.json()
+        if data.get("Response") != "Success":
+            raise ValueError(f"CryptoCompare erro: {data.get('Message')}")
+        
+        prices = data.get("Data", {}).get("Data", [])
+        if not prices:
+            raise ValueError("CryptoCompare retornou vazio")
+        
+        print(f"✅ CryptoCompare retornou {len(prices)} dias")
+        
+        # Processa dados
         rows = []
-        for candle in all_data:
-            date = pd.to_datetime(candle[0], unit="ms").date()
+        for item in prices:
+            date = datetime.fromtimestamp(item["time"]).date()
             rows.append({
                 "date": date,
-                "Open": float(candle[1]),
-                "Close": float(candle[4])
+                "Open": float(item["open"]),
+                "Close": float(item["close"])
             })
         
-        df = pd.DataFrame(rows).drop_duplicates("date")
-        print(f"📅 Período: {df['date'].min()} até {df['date'].max()}")
+        result = pd.DataFrame(rows)
+        print(f"📅 Período: {result['date'].min()} até {result['date'].max()}")
         
-        return df
+        return result
         
     except Exception as e:
-        print(f"❌ Binance falhou: {e}")
+        print(f"❌ CryptoCompare falhou: {e}")
         return None
 
 def fetch_btc_history():
     """
     Tenta múltiplas fontes em ordem de prioridade.
     """
-    # Prioridade 1: CoinGecko
-    df = fetch_btc_coingecko()
+    # Prioridade 1: Yahoo Finance (mais confiável, histórico completo)
+    df = fetch_btc_yfinance()
     if df is not None and not df.empty:
         return df
     
-    # Prioridade 2: Binance
-    df = fetch_btc_binance()
+    # Prioridade 2: CryptoCompare (2000 dias de histórico)
+    df = fetch_btc_cryptocompare()
+    if df is not None and not df.empty:
+        return df
+    
+    # Prioridade 3: CoinGecko free (365 dias apenas)
+    df = fetch_btc_coingecko_free()
     if df is not None and not df.empty:
         return df
     
